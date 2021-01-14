@@ -1,0 +1,214 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+######
+# Optional:
+# Modify instance type and AMI image
+######
+
+Parameters:
+
+  InstanceTypeParameter:
+    Type: String
+    Default: t2.micro
+    Description: Enter instance size.
+
+  # Use Amazon Linux 2 AMI for C2 servers
+  AMI:
+    Type: String
+    Default: ami-0be2609ba883822ec
+    Description: The Linux AMI to use.
+
+######
+# Part 1:
+# Create the core VPC/subnet components
+######
+
+Resources:
+
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-VPC
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    DependsOn: VPC
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-InternetGW
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  Subnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.0.0/24
+      AvailabilityZone: us-east-1a  # Change to desired AZ
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-Subnet
+
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-RouteTable
+
+  # Make sure instances in subnet can access the internet
+  RouteInternetAccess:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  # Apply internet-accessible routing table to subnets
+  SubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref Subnet
+      RouteTableId: !Ref RouteTable
+
+######
+# Part 2:
+# Create Security Groups and C2 Instances
+######
+# TODO: SSM SSH and SCP
+# https://www.tripwire.com/state-of-security/security-data-protection/cloud/aws-session-manager-enhanced-ssh-scp-capability/
+
+  Ec2InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ ec2.amazonaws.com ]
+            Action:
+              - sts:AssumeRole
+      Path: /
+
+  Ec2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles: [ !Ref Ec2InstanceRole ]
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${AWS::StackName}-SecurityGroup
+      GroupDescription: "Only Allow outbound traffic. Use SSM to connect to instance"
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-SecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  StagingServer:
+    Type: "AWS::EC2::Instance"
+    Properties:
+      ImageId: !Ref AMI
+      InstanceType:
+        Ref: InstanceTypeParameter
+      IamInstanceProfile: !Ref Ec2InstanceProfile
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          SubnetId: !Ref Subnet
+          GroupSet:
+            - Ref: SecurityGroup
+      BlockDeviceMappings:
+        - DeviceName: "/dev/xvda"
+          Ebs:
+            VolumeSize: "10"
+            DeleteOnTermination: "true"
+      Tags:
+        - Key: Name
+          Value: "Staging-C2"
+
+  PostExServer:
+    Type: "AWS::EC2::Instance"
+    Properties:
+      ImageId: !Ref AMI
+      InstanceType:
+        Ref: InstanceTypeParameter
+      IamInstanceProfile: !Ref Ec2InstanceProfile
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          SubnetId: !Ref Subnet
+          GroupSet:
+            - Ref: SecurityGroup
+      BlockDeviceMappings:
+        - DeviceName: "/dev/xvda"
+          Ebs:
+            VolumeSize: "10"
+            DeleteOnTermination: "true"
+      Tags:
+        - Key: Name
+          Value: "PostEx-C2"
+
+  LongHaulServer:
+    Type: "AWS::EC2::Instance"
+    Properties:
+      ImageId: !Ref AMI
+      InstanceType:
+        Ref: InstanceTypeParameter
+      IamInstanceProfile: !Ref Ec2InstanceProfile
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          SubnetId: !Ref Subnet
+          GroupSet:
+            - Ref: SecurityGroup
+      BlockDeviceMappings:
+        - DeviceName: "/dev/xvda"
+          Ebs:
+            VolumeSize: "10"
+            DeleteOnTermination: "true"
+      Tags:
+        - Key: Name
+          Value: "LongHaul-C2"
+
+######
+# Part 3:
+# TODO: Create lambda redirectors
+######
+
+# Lambda redirector
+# magic goes here
+
+######
+# Part 4:
+# Output C2 public IP addresses
+######
+
+Outputs:
+  StagingPublicIP:
+    Description: "Staging-C2 Public IP"
+    Value: !GetAtt StagingServer.PublicIp
+  PostExPublicIP:
+    Description: "PostEx-C2 Public IP"
+    Value: !GetAtt PostExServer.PublicIp
+  LongHaulPublicIP:
+    Description: "LongHaul-C2 Public IP"
+    Value: !GetAtt LongHaulServer.PublicIp
